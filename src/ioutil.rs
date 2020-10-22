@@ -9,7 +9,7 @@ where
     from.try_into()
 }
 
-pub(crate) async fn read_n_bytes(
+pub(crate) async fn _read_n_bytes(
     mut stream: impl Unpin + ReadExt,
     buf: &mut [u8],
     count: usize,
@@ -20,7 +20,12 @@ pub(crate) async fn read_n_bytes(
 
     let mut nr = 0;
     while nr < count {
-        nr += stream.read(&mut buf[nr..]).await?;
+        let n = stream.read(&mut buf[nr..]).await?;
+        if n == 0 {
+            break;
+        } else {
+            nr += n;
+        }
     }
 
     if nr == count {

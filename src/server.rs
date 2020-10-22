@@ -16,22 +16,20 @@ const TYP_DOMAIN: u8 = 0x3;
 const TYP_IPV6: u8 = 0x4;
 const RESP_SUCCESS: u8 = 0x0;
 
-async fn socks5_handshake(mut stream: &mut TcpStream) -> Result<String, Socks5Error> {
-    let mut buf = [0u8; 2];
+async fn socks5_handshake(mut stream: &TcpStream) -> Result<String, Socks5Error> {
+    let mut buf = [0u8; 0xff];
 
-    stream.read_exact(&mut buf).await?;
+    stream.read_exact(&mut buf[..2]).await?;
     if buf[0] != SOCKS_VERSION {
         return Err(Socks5Error::UnsupportedVersion);
     }
 
     let nmethod = buf[1] as usize;
-    let mut buf = vec![0u8; nmethod];
-    crate::ioutil::read_n_bytes(&mut stream, &mut buf, nmethod).await?;
+    stream.read_exact(&mut buf[..nmethod]).await?;
 
     stream.write_all(&[SOCKS_VERSION, NO_AUTH]).await?;
 
-    let mut buf = [0u8; 4];
-    stream.read_exact(&mut buf).await?;
+    stream.read_exact(&mut buf[..4]).await?;
     if buf[0] != SOCKS_VERSION {
         return Err(Socks5Error::UnsupportedVersion);
     }
@@ -42,10 +40,8 @@ async fn socks5_handshake(mut stream: &mut TcpStream) -> Result<String, Socks5Er
     let host: String;
     match buf[3] {
         TYP_IPV4 => {
-            let mut buf = vec![0u8; 4];
-            crate::ioutil::read_n_bytes(&mut stream, &mut buf, 4).await?;
-
-            if let Ok(bs) = crate::ioutil::try_into_wrapper::<&[u8], [u8; 4]>(&buf) {
+            stream.read_exact(&mut buf[..4]).await?;
+            if let Ok(bs) = crate::ioutil::try_into_wrapper::<&[u8], [u8; 4]>(&buf[..4]) {
                 host = Ipv4Addr::from(bs).to_string();
             } else {
                 return Err(Socks5Error::ParseAddrError);
@@ -53,13 +49,11 @@ async fn socks5_handshake(mut stream: &mut TcpStream) -> Result<String, Socks5Er
         }
 
         TYP_DOMAIN => {
-            let mut one_byte = [0u8; 1];
-            stream.read_exact(&mut one_byte).await?;
-            let domain_len = one_byte[0].clone() as usize;
-            let mut domain = vec![0; domain_len];
+            stream.read_exact(&mut buf[..1]).await?;
+            let domain_len = buf[0] as usize;
 
-            crate::ioutil::read_n_bytes(&mut stream, &mut domain, domain_len).await?;
-            if let Ok(tmp_host) = String::from_utf8(domain) {
+            stream.read_exact(&mut buf[..domain_len]).await?;
+            if let Ok(tmp_host) = String::from_utf8(buf[..domain_len].to_vec()) {
                 host = tmp_host;
             } else {
                 return Err(Socks5Error::ParseAddrError);
@@ -67,9 +61,8 @@ async fn socks5_handshake(mut stream: &mut TcpStream) -> Result<String, Socks5Er
         }
 
         TYP_IPV6 => {
-            let mut buf = vec![0u8; 16];
-            crate::ioutil::read_n_bytes(&mut stream, &mut buf, 16).await?;
-            if let Ok(bs) = crate::ioutil::try_into_wrapper::<&[u8], [u8; 16]>(&buf) {
+            stream.read_exact(&mut buf[..16]).await?;
+            if let Ok(bs) = crate::ioutil::try_into_wrapper::<&[u8], [u8; 16]>(&buf[..16]) {
                 host = Ipv6Addr::from(bs).to_string();
             } else {
                 return Err(Socks5Error::ParseAddrError);
@@ -78,9 +71,8 @@ async fn socks5_handshake(mut stream: &mut TcpStream) -> Result<String, Socks5Er
         _ => return Err(Socks5Error::UnrecognizedAddrType),
     };
 
-    let mut buf = [0u8; 2];
-    stream.read_exact(&mut buf).await?;
-    let port = ((buf[0] as u16) << 8) + buf[1] as u16;
+    stream.read_exact(&mut buf[..2]).await?;
+    let port = unsafe { *(buf.as_ptr() as *const u16) }.to_be();
 
     Ok(host + ":" + &port.to_string())
 }
@@ -150,8 +142,8 @@ pub async fn start_socks5_server(
         .await?
         .incoming()
         .for_each_concurrent(max_connections, |stream| async move {
-            if let Ok(mut stream) = stream {
-                match socks5_handshake(&mut stream).await {
+            if let Ok(stream) = stream {
+                match socks5_handshake(&stream).await {
                     Ok(target) => {
                         let _ = socks5_forward(stream, target).await;
                     }
