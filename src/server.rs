@@ -1,7 +1,7 @@
 use crate::errors::Socks5Error;
 use async_std::{
     io,
-    net::{Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream},
     prelude::*,
     task,
 };
@@ -16,7 +16,7 @@ const TYP_DOMAIN: u8 = 0x3;
 const TYP_IPV6: u8 = 0x4;
 const RESP_SUCCESS: u8 = 0x0;
 
-async fn socks5_handshake(mut stream: &TcpStream) -> Result<String, Socks5Error> {
+async fn socks5_handshake(mut stream: &TcpStream) -> Result<Vec<SocketAddr>, Socks5Error> {
     let mut buf = [0u8; 0xff];
 
     stream.read_exact(&mut buf[..2]).await?;
@@ -37,12 +37,12 @@ async fn socks5_handshake(mut stream: &TcpStream) -> Result<String, Socks5Error>
         return Err(Socks5Error::UnsupportedCommand);
     }
 
-    let host: String;
+    let host: Vec<IpAddr>;
     match buf[3] {
         TYP_IPV4 => {
             stream.read_exact(&mut buf[..4]).await?;
             if let Ok(bs) = crate::ioutil::try_into_wrapper::<&[u8], [u8; 4]>(&buf[..4]) {
-                host = Ipv4Addr::from(bs).to_string();
+                host = vec![IpAddr::V4(Ipv4Addr::from(bs))];
             } else {
                 return Err(Socks5Error::ParseAddrError);
             }
@@ -54,7 +54,7 @@ async fn socks5_handshake(mut stream: &TcpStream) -> Result<String, Socks5Error>
 
             stream.read_exact(&mut buf[..domain_len]).await?;
             if let Ok(tmp_host) = String::from_utf8(buf[..domain_len].to_vec()) {
-                host = tmp_host;
+                host = dns_lookup::lookup_host(&tmp_host)?;
             } else {
                 return Err(Socks5Error::ParseAddrError);
             }
@@ -63,7 +63,7 @@ async fn socks5_handshake(mut stream: &TcpStream) -> Result<String, Socks5Error>
         TYP_IPV6 => {
             stream.read_exact(&mut buf[..16]).await?;
             if let Ok(bs) = crate::ioutil::try_into_wrapper::<&[u8], [u8; 16]>(&buf[..16]) {
-                host = Ipv6Addr::from(bs).to_string();
+                host = vec![IpAddr::V6(Ipv6Addr::from(bs))];
             } else {
                 return Err(Socks5Error::ParseAddrError);
             }
@@ -72,13 +72,20 @@ async fn socks5_handshake(mut stream: &TcpStream) -> Result<String, Socks5Error>
     };
 
     stream.read_exact(&mut buf[..2]).await?;
-    let port = unsafe { *(buf.as_ptr() as *const u16) }.to_be();
 
-    Ok(host + ":" + &port.to_string())
+    // Transmute [u8; _] to SocketAddr manually,
+    // to avoid `<str as async_std::net::ToSocketAddrs>::to_socket_addrs`'s shitty logic
+    Ok(host
+        .into_iter()
+        .map(|h| SocketAddr::new(h, unsafe { *(buf.as_ptr() as *const u16) }.to_be()))
+        .collect())
 }
 
-async fn socks5_forward(mut local: TcpStream, target: String) -> Result<(), std::io::Error> {
-    let mut remote = TcpStream::connect(target).await?;
+async fn socks5_forward(
+    mut local: TcpStream,
+    target: Vec<SocketAddr>,
+) -> Result<(), std::io::Error> {
+    let mut remote = TcpStream::connect(target.as_slice()).await?;
 
     match remote.peer_addr() {
         Ok(SocketAddr::V4(ipv4)) => {

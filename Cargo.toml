@@ -9,6 +9,7 @@ edition = "2018"
 [dependencies]
 futures = "0.3.6"
 async-std = "1.6.5"
+dns-lookup = "1.0.5"
 
 [profile.release]
 lto = "fat"
